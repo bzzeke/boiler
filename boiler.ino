@@ -1,4 +1,4 @@
-#include <OneWire.h> 
+#include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ModbusSlave.h>
 #include <TimerOne.h>
@@ -25,6 +25,7 @@
 #define PIN_REMOTE_CONTROL A0
 #define PIN_TEMPERATURE A1
 #define PIN_PUMP A2
+#define PIN_FAN 2
 
 #define PIN_COIL1 A3
 #define PIN_COIL2 A4
@@ -48,8 +49,9 @@
 #define TEMP_SENSOR_FAILURE 0
 #define FLOW_SENSOR_START_DELAY 10000
 #define W1_POLL 10000
+#define TIME_POLL 60000
 
-OneWire oneWire(PIN_TEMPERATURE); 
+OneWire oneWire(PIN_TEMPERATURE);
 DallasTemperature sensors(&oneWire);
 
 Modbus slave(237, PIN_RS484_SIG); // [stream = Serial,] slave id = 237, rs485 control-pin = 3
@@ -64,10 +66,12 @@ typedef struct {
   bool remote;
 //  bool flow;
   bool tempok;
-
+  String time;
+  String date;
   int temperature;
   int currentTemperature;
   unsigned long tempLastPoll;
+  unsigned long timeLastPoll;
   unsigned long pumpStartTime;
 } State;
 
@@ -91,7 +95,8 @@ void setup() {
 //  pinMode(PIN_FLOW_SENSOR, INPUT_PULLUP);
   pinMode(PIN_REMOTE_CONTROL, INPUT_PULLUP);
   pinMode(PIN_PUMP, OUTPUT);
-  
+  pinMode(PIN_FAN, OUTPUT);
+
   pinMode(PIN_COIL1, OUTPUT);
   pinMode(PIN_COIL2, OUTPUT);
   pinMode(PIN_COIL3, OUTPUT);
@@ -102,11 +107,12 @@ void setup() {
   state.pump = false;
   state.remote = getState(PIN_REMOTE_CONTROL);
 //  state.flow = getState(PIN_FLOW_SENSOR);
-  state.temperature = 68;
+  state.temperature = 75;
   state.tempLastPoll = 0;
+  state.timeLastPoll = 0;
   getTemperature();
   state.pumpStartTime = 0;
-  
+
   /*int savedTemp = EEPROM.read(EEPROM_ADDRESS);
   if (savedTemp) {
     state.temperature = savedTemp;
@@ -135,16 +141,29 @@ void modbusPoll()
     slave.poll();
 }
 
-uint8_t modbusOut(uint8_t fc, uint16_t address, uint16_t length) 
+uint8_t modbusOut(uint8_t fc, uint16_t address, uint16_t length)
 {
-    slave.writeRegisterToBuffer(0, state.currentTemperature);
-    slave.writeRegisterToBuffer(1, state.temperature);
-    slave.writeRegisterToBuffer(2, state.boiler ? 1 : 0);
-    slave.writeRegisterToBuffer(3, state.coil2 ? 1 : 0);
-    slave.writeRegisterToBuffer(4, state.coil3 ? 1 : 0);
-    slave.writeRegisterToBuffer(5, state.pump ? 1 : 0);
-    slave.writeRegisterToBuffer(6, state.remote ? 1 : 0);
-    slave.writeRegisterToBuffer(7, state.tempok ? 1 : 0);
+    int readAddress = 0;
+    for (int i = 0; i < length; i++) {
+        readAddress = address + i;
+        if (readAddress == 0) {
+            slave.writeRegisterToBuffer(i, state.currentTemperature);
+        } else if (readAddress == 1) {
+            slave.writeRegisterToBuffer(i, state.temperature);
+        } else if (readAddress == 2) {
+            slave.writeRegisterToBuffer(i, state.boiler ? 1 : 0);
+        } else if (readAddress == 3) {
+            slave.writeRegisterToBuffer(i, state.coil2 ? 1 : 0);
+        } else if (readAddress == 4) {
+            slave.writeRegisterToBuffer(i, state.coil3 ? 1 : 0);
+        } else if (readAddress == 5) {
+            slave.writeRegisterToBuffer(i, state.pump ? 1 : 0);
+        } else if (readAddress == 6) {
+            slave.writeRegisterToBuffer(i, state.remote ? 1 : 0);
+        } else if (readAddress == 7) {
+            slave.writeRegisterToBuffer(i, state.tempok ? 1 : 0);
+        }
+    }
 
     return STATUS_OK;
 }
@@ -159,7 +178,7 @@ void manageBoiler()
   // need reset to restart
   if (failedState == true) {
     switchBoiler(false, true);
-    return;    
+    return;
   }
 
   // set off: no flow
@@ -199,7 +218,8 @@ void manageBoiler()
 void checkPump()
 {
   if (state.boiler == false && state.currentTemperature <= PUMP_TEMP_THRESHOLD) {
-    writePin(PIN_PUMP, LOW); 
+    writePin(PIN_PUMP, LOW);
+    writePin(PIN_FAN, LOW);
   }
 }
 
@@ -231,9 +251,10 @@ bool switchBoiler(bool on, bool forceoff)
   }
 
   int value = on ? HIGH : LOW;
-  
+
   if (on == true) {
     writePin(PIN_PUMP, HIGH);
+    writePin(PIN_FAN, HIGH);
   }
 
   if (on == false && forceoff == true) {
@@ -242,7 +263,7 @@ bool switchBoiler(bool on, bool forceoff)
 
   writePin(PIN_COIL1, value);
   delay(1000);
-  writePin(PIN_COIL2, value);  
+  writePin(PIN_COIL2, value);
   delay(1000);
   writePin(PIN_COIL3, value);
 
@@ -251,7 +272,7 @@ bool switchBoiler(bool on, bool forceoff)
 
 void updateScreen()
 {
-  unsigned char image[1024];  
+  unsigned char image[1024];
   char line1[20];
   char line2[20];
   char line3[50];
@@ -263,61 +284,66 @@ void updateScreen()
   sprintf(line3, "C1: [%s], C2: [%s], C3: [%s]", (state.boiler == true ? "ON" : "OFF"), (state.coil2 == true ? "ON" : "OFF"), (state.coil3 == true ? "ON" : "OFF"));
   sprintf(line4, "Pump: [%s], Remote: [%s]", (state.pump == true ? "ON" : "OFF"), (state.remote == true ? "ON" : "OFF"));
   sprintf(line5, "Temp: [%s]", (state.tempok == true ? "OK" : "FAIL"));
-  
+
   /*Serial.println("Screen");
   Serial.println(line1);
   Serial.println(line2);
   Serial.println(line3);
   Serial.println(line4);
   Serial.println(line5);
-  return;*/
-  
+*/
+  return;
+
   if (epd.Init() != 0) {
-    Serial.print("e-Paper init failed");
-    return;
+//    Serial.print("e-Paper init failed");
   }
 
   epd.ClearFrame();
-  
-  Paint paint(image, 24, 264);
-  paint.SetRotate(ROTATE_270);
 
-  paint.Clear(UNCOLORED);  
+  Paint paint(image, 24, 264);
+  paint.SetRotate(ROTATE_90);
+
+  paint.Clear(UNCOLORED);
   paint.DrawStringAt(0, 0, line1, &Font20, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 16, 0, paint.GetWidth(), paint.GetHeight());
+  epd.TransmitPartialData(paint.GetImage(), 151, 5, paint.GetWidth(), paint.GetHeight());
 
   paint.Clear(UNCOLORED);
   paint.DrawStringAt(0, 0, line2, &Font20, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 40, 0, paint.GetWidth(), paint.GetHeight());
+  epd.TransmitPartialData(paint.GetImage(), 120, 5, paint.GetWidth(), paint.GetHeight());
 
+  paint.SetWidth(16);
   paint.Clear(UNCOLORED);
   paint.DrawStringAt(0, 0, line3, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 64, 0, paint.GetWidth(), paint.GetHeight());  
+  epd.TransmitPartialData(paint.GetImage(), 100, 5, paint.GetWidth(), paint.GetHeight());
 
   paint.Clear(UNCOLORED);
   paint.DrawStringAt(0, 0, line4, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 84, 0, paint.GetWidth(), paint.GetHeight());  
-  
+  epd.TransmitPartialData(paint.GetImage(), 87, 5, paint.GetWidth(), paint.GetHeight());
+
   paint.Clear(UNCOLORED);
   paint.DrawStringAt(0, 0, line5, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 98, 0, paint.GetWidth(), paint.GetHeight());    
-  
+  epd.TransmitPartialData(paint.GetImage(), 70, 5, paint.GetWidth(), paint.GetHeight());
+
+  /*paint.Clear(UNCOLORED);
+  paint.DrawStringAt(0, 0, line6, &Font12, COLORED);
+  epd.TransmitPartialData(paint.GetImage(), 53, 5, paint.GetWidth(), paint.GetHeight());    */
+
   epd.DisplayFrame();
-  epd.Sleep();    
+  epd.Sleep();
 }
 
 bool handleKeys()
 {
   // increase temperature
-  if (digitalRead(PIN_KEY1) == LOW) {
-    state.temperature = changeTemperature(state.currentTemperature, INCREASE_TEMP );
+  if (digitalRead(PIN_KEY2) == LOW) {
+    state.temperature = changeTemperature(state.temperature, INCREASE_TEMP );
 //    EEPROM.write(EEPROM_ADDRESS, state.temperature);
     return true;
   }
 
   // decrese temperature
-  if (digitalRead(PIN_KEY2) == LOW) {
-    state.temperature = changeTemperature(state.currentTemperature, DECREASE_TEMP);
+  if (digitalRead(PIN_KEY1) == LOW) {
+    state.temperature = changeTemperature(state.temperature, DECREASE_TEMP);
 //    EEPROM.write(EEPROM_ADDRESS, state.temperature);
     return true;
   }
@@ -326,7 +352,7 @@ bool handleKeys()
   /*if (digitalRead(PIN_KEY3) == LOW) {
     failedState = false;
     return true;
-  }*/ 
+  }*/
 
   return false;
 }
@@ -351,11 +377,15 @@ bool writePin(unsigned char pin, int value)
     case PIN_PUMP:
       if (state.pump == (value == HIGH)) {
         return false;
-      }    
+      }
       state.pump = (value == HIGH);
       if (state.pump == true) {
         state.pumpStartTime = millis();
-      }      
+      }
+      digitalWrite(pin, value);
+      break;
+
+    case PIN_FAN:
       digitalWrite(pin, value);
       break;
 
@@ -365,20 +395,20 @@ bool writePin(unsigned char pin, int value)
       }
       state.boiler = (value == HIGH);
       digitalWrite(pin, value);
-      break;    
-        
+      break;
+
     case PIN_COIL2:
       if (state.coil2 == (value == HIGH)) {
         return false;
-      }    
+      }
       state.coil2 = (value == HIGH);
       digitalWrite(pin, value);
       break;
-      
+
     case PIN_COIL3:
       if (state.coil3 == (value == HIGH)) {
         return false;
-      }    
+      }
       state.coil3 = (value == HIGH);
       digitalWrite(pin, value);
       break;
@@ -391,11 +421,11 @@ bool getTemperature()
     int value = 0;
     int max_tries = 3;
     int sleep = 5000;
-          
+
     if (millis() < state.tempLastPoll) { // overflow
       state.tempLastPoll = millis();
     }
-    
+
     if ((millis() - state.tempLastPoll) > W1_POLL || state.tempLastPoll == 0) {
       state.tempLastPoll = millis();
       for (i = 0; i <= max_tries; i++) {
@@ -406,19 +436,19 @@ bool getTemperature()
         }
         delay(i * sleep);
       }
-    
+
       state.currentTemperature = value;
-      state.tempok = value > TEMP_SENSOR_FAILURE;    
+      state.tempok = value > TEMP_SENSOR_FAILURE;
     }
 
-    
-    return state.tempok;  
+
+    return state.tempok;
 }
 
 bool getState(unsigned char pin)
 {
   int value = 0;
-  
+
   value = digitalRead(pin);
 
   switch(pin)
@@ -429,13 +459,13 @@ bool getState(unsigned char pin)
     case PIN_REMOTE_CONTROL:
       state.remote = (value == LOW);
       return state.remote;
-  }    
+  }
 }
 
 bool compareStates(State old, State current)
 {
-  if (old.boiler != current.boiler || 
-      old.coil2 != current.coil2 || 
+  if (old.boiler != current.boiler ||
+      old.coil2 != current.coil2 ||
       old.coil3 != current.coil3 ||
       old.pump != current.pump ||
       old.remote != current.remote ||
