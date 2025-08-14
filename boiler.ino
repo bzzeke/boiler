@@ -2,7 +2,7 @@
 #include <DallasTemperature.h>
 #include <ModbusSlave.h>
 #include <TimerOne.h>
-
+#include <Nextion.h>
 #include <EEPROM.h>
 
 #define COLORED     0
@@ -25,7 +25,7 @@
 #define PIN_COIL3 A5
 
 
-#define EEPROM_ADDRESS 0
+#define TEMPERATURE_EEPROM_ADDRESS 0
 
 #define MAX_TEMPERATURE 100
 #define MIN_TEMPERATURE 30
@@ -43,6 +43,31 @@
 #define FLOW_SENSOR_START_DELAY 10000
 #define W1_POLL 10000
 #define TIME_POLL 60000
+#define TEMP_CHANGE_POLL 2000
+
+#define COLOR_OK 2016
+#define COLOR_FAIL 64073
+#define COLOR_NORMAL 50712
+
+NexText tCoil1 = NexText(0, 1, "tCoil1");
+NexText tCoil2 = NexText(0, 2, "tCoil2");
+NexText tCoil3 = NexText(0, 3, "tCoil3");
+
+NexText tPump = NexText(0, 9, "tPump");
+NexText tRemote = NexText(0, 10, "tRemote");
+NexText tSensor = NexText(0, 11, "tSensor");
+
+NexNumber nTSetpoint = NexNumber(0, 6, "nTSetpoint");
+NexNumber nTCurrent = NexNumber(0, 7, "nTCurrent");
+
+NexButton bPlus = NexButton(0, 4, "bPlus");
+NexButton bMinus = NexButton(0, 5, "bMinus");
+
+NexTouch *nex_listen_list[] = {
+  &bPlus,
+  &bMinus,
+  NULL
+};
 
 OneWire oneWire(PIN_TEMPERATURE);
 DallasTemperature sensors(&oneWire);
@@ -62,11 +87,19 @@ typedef struct {
   int temperature;
   int currentTemperature;
   unsigned long tempLastPoll;
-  unsigned long timeLastPoll;
+  unsigned long tempChangeLastPoll;
   unsigned long pumpStartTime;
 } State;
 
 State state;
+
+void bPlusCallback(void *ptr) {
+  state.temperature = changeTemperature(state.temperature, INCREASE_TEMP);
+}
+
+void bMinusCallback(void *ptr) {
+  state.temperature = changeTemperature(state.temperature, DECREASE_TEMP);
+}
 
 void setup() {
   pinMode(PIN_RS484_SIG, OUTPUT);
@@ -75,8 +108,7 @@ void setup() {
   Timer1.attachInterrupt(modbusPoll, 500);
 
   slave.cbVector[CB_READ_REGISTERS] = modbusOut;
-  slave.cbVector[CB_WRITE_COIL] = modbusIn;
-
+  
   Serial.begin(9600, SERIAL_8N2);
   slave.begin(9600);
 
@@ -98,22 +130,26 @@ void setup() {
 //  state.flow = getState(PIN_FLOW_SENSOR);
   state.temperature = 75;
   state.tempLastPoll = 0;
-  state.timeLastPoll = 0;
+  state.tempChangeLastPoll = 0;
   getTemperature();
   state.pumpStartTime = 0;
 
-  /*int savedTemp = EEPROM.read(EEPROM_ADDRESS);
+  int savedTemp = EEPROM.read(TEMPERATURE_EEPROM_ADDRESS);
   if (savedTemp) {
     state.temperature = savedTemp;
-  }*/
+  }
 
   sensors.begin();
+
+  nexInit();
+
+  bPlus.attachPop(bPlusCallback, &bPlus);
+  bMinus.attachPop(bMinusCallback, &bMinus);
 }
 
 void loop() {
   State oldState = state;
 
-  handleKeys();
   manageBoiler();
   checkCoils();
   checkPump();
@@ -122,7 +158,28 @@ void loop() {
     updateScreen();
   }
 
+  nexLoop(nex_listen_list);
+
+  if (state.tempChangeLastPoll > 0 && millis() - state.tempChangeLastPoll > TEMP_CHANGE_POLL) {
+    EEPROM.write(TEMPERATURE_EEPROM_ADDRESS, state.temperature);
+    state.tempChangeLastPoll = 0;
+  }
+
   delay(1000);
+}
+
+void updateScreen()
+{
+  tCoil1.Set_background_color_bco(state.boiler ? COLOR_OK : COLOR_NORMAL);
+  tCoil2.Set_background_color_bco(state.coil2 ? COLOR_OK : COLOR_NORMAL);
+  tCoil3.Set_background_color_bco(state.coil3 ? COLOR_OK : COLOR_NORMAL);
+
+  tPump.Set_background_color_bco(state.pump ? COLOR_OK : COLOR_NORMAL);
+  tRemote.Set_background_color_bco(state.remote ? COLOR_OK : COLOR_NORMAL);
+  tSensor.Set_background_color_bco(state.tempok ? COLOR_OK : COLOR_FAIL);
+
+  nTCurrent.setValue(state.currentTemperature);
+  nTSetpoint.setValue(state.temperature);
 }
 
 void modbusPoll()
@@ -260,39 +317,27 @@ bool switchBoiler(bool on, bool forceoff)
 }
 
 
-bool handleKeys()
+/*bool handleKeys()
 {
-  // increase temperature
-/*  if (digitalRead(PIN_KEY2) == LOW) {
-    state.temperature = changeTemperature(state.temperature, INCREASE_TEMP );
-   EEPROM.write(EEPROM_ADDRESS, state.temperature);
-    return true;
-  }
-
-  // decrese temperature
-  if (digitalRead(PIN_KEY1) == LOW) {
-    state.temperature = changeTemperature(state.temperature, DECREASE_TEMP);
-   EEPROM.write(EEPROM_ADDRESS, state.temperature);
-    return true;
-  }
-*/
   // reset failed state
-  /*if (digitalRead(PIN_KEY3) == LOW) {
+  if (digitalRead(PIN_KEY3) == LOW) {
     failedState = false;
     return true;
-  }*/
+  }
 
   return false;
-}
+}*/
 
 int changeTemperature(int temperature, char sign)
 {
   if (sign == INCREASE_TEMP && temperature < MAX_TEMPERATURE) {
     temperature++;
+    state.tempChangeLastPoll = millis();
   }
 
   if (sign == DECREASE_TEMP && temperature > MIN_TEMPERATURE) {
     temperature--;
+    state.tempChangeLastPoll = millis();
   }
 
   return temperature;
