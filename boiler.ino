@@ -3,18 +3,11 @@
 #include <ModbusSlave.h>
 #include <TimerOne.h>
 
-#include <SPI.h>
-#include <epd2in7.h>
-#include <epdpaint.h>
-
 #include <EEPROM.h>
 
 #define COLORED     0
 #define UNCOLORED   1
 
-#define PIN_KEY1 4
-#define PIN_KEY2 5
-#define PIN_KEY3 6
 //#define PIN_FLOW_SENSOR 2
 
 #define PIN_RS484_RO 0 //tx
@@ -56,8 +49,6 @@ DallasTemperature sensors(&oneWire);
 
 Modbus slave(237, PIN_RS484_SIG); // [stream = Serial,] slave id = 237, rs485 control-pin = 3
 
-Epd epd;
-
 typedef struct {
   bool boiler;
   bool coil2;
@@ -84,12 +75,10 @@ void setup() {
   Timer1.attachInterrupt(modbusPoll, 500);
 
   slave.cbVector[CB_READ_REGISTERS] = modbusOut;
+  slave.cbVector[CB_WRITE_COIL] = modbusIn;
+
   Serial.begin(9600, SERIAL_8N2);
   slave.begin(9600);
-
-  pinMode(PIN_KEY1, INPUT_PULLUP);
-  pinMode(PIN_KEY2, INPUT_PULLUP);
-  pinMode(PIN_KEY3, INPUT_PULLUP);
 
   pinMode(PIN_TEMPERATURE, INPUT);
 //  pinMode(PIN_FLOW_SENSOR, INPUT_PULLUP);
@@ -270,84 +259,23 @@ bool switchBoiler(bool on, bool forceoff)
   return true;
 }
 
-void updateScreen()
-{
-  unsigned char image[1024];
-  char line1[20];
-  char line2[20];
-  char line3[50];
-  char line4[50];
-  char line5[50];
-
-  sprintf(line1, "Target: %d", state.temperature);
-  sprintf(line2, "Current: %d", state.currentTemperature);
-  sprintf(line3, "C1: [%s], C2: [%s], C3: [%s]", (state.boiler == true ? "ON" : "OFF"), (state.coil2 == true ? "ON" : "OFF"), (state.coil3 == true ? "ON" : "OFF"));
-  sprintf(line4, "Pump: [%s], Remote: [%s]", (state.pump == true ? "ON" : "OFF"), (state.remote == true ? "ON" : "OFF"));
-  sprintf(line5, "Temp: [%s]", (state.tempok == true ? "OK" : "FAIL"));
-
-  /*Serial.println("Screen");
-  Serial.println(line1);
-  Serial.println(line2);
-  Serial.println(line3);
-  Serial.println(line4);
-  Serial.println(line5);
-*/
-  return;
-
-  if (epd.Init() != 0) {
-//    Serial.print("e-Paper init failed");
-  }
-
-  epd.ClearFrame();
-
-  Paint paint(image, 24, 264);
-  paint.SetRotate(ROTATE_90);
-
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line1, &Font20, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 151, 5, paint.GetWidth(), paint.GetHeight());
-
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line2, &Font20, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 120, 5, paint.GetWidth(), paint.GetHeight());
-
-  paint.SetWidth(16);
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line3, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 100, 5, paint.GetWidth(), paint.GetHeight());
-
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line4, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 87, 5, paint.GetWidth(), paint.GetHeight());
-
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line5, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 70, 5, paint.GetWidth(), paint.GetHeight());
-
-  /*paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line6, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 53, 5, paint.GetWidth(), paint.GetHeight());    */
-
-  epd.DisplayFrame();
-  epd.Sleep();
-}
 
 bool handleKeys()
 {
   // increase temperature
-  if (digitalRead(PIN_KEY2) == LOW) {
+/*  if (digitalRead(PIN_KEY2) == LOW) {
     state.temperature = changeTemperature(state.temperature, INCREASE_TEMP );
-//    EEPROM.write(EEPROM_ADDRESS, state.temperature);
+   EEPROM.write(EEPROM_ADDRESS, state.temperature);
     return true;
   }
 
   // decrese temperature
   if (digitalRead(PIN_KEY1) == LOW) {
     state.temperature = changeTemperature(state.temperature, DECREASE_TEMP);
-//    EEPROM.write(EEPROM_ADDRESS, state.temperature);
+   EEPROM.write(EEPROM_ADDRESS, state.temperature);
     return true;
   }
-
+*/
   // reset failed state
   /*if (digitalRead(PIN_KEY3) == LOW) {
     failedState = false;
