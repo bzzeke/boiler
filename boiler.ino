@@ -5,9 +5,6 @@
 #include <Nextion.h>
 #include <EEPROM.h>
 
-#define COLORED     0
-#define UNCOLORED   1
-
 //#define PIN_FLOW_SENSOR 2
 
 #define PIN_RS484_RO 0 //tx
@@ -27,8 +24,8 @@
 
 #define TEMPERATURE_EEPROM_ADDRESS 0
 
-#define MAX_TEMPERATURE 100
-#define MIN_TEMPERATURE 30
+#define MAX_TEMPERATURE 85
+#define MIN_TEMPERATURE 20
 
 #define INCREASE_TEMP '+'
 #define DECREASE_TEMP '-'
@@ -49,19 +46,19 @@
 #define COLOR_FAIL 64073
 #define COLOR_NORMAL 50712
 
-NexText tCoil1 = NexText(0, 1, "tCoil1");
-NexText tCoil2 = NexText(0, 2, "tCoil2");
-NexText tCoil3 = NexText(0, 3, "tCoil3");
+NexText tCoil1 = NexText(0, 3, "tCoil1");
+NexText tCoil2 = NexText(0, 4, "tCoil2");
+NexText tCoil3 = NexText(0, 5, "tCoil3");
 
-NexText tPump = NexText(0, 9, "tPump");
-NexText tRemote = NexText(0, 10, "tRemote");
-NexText tSensor = NexText(0, 11, "tSensor");
+NexText tPump = NexText(0, 8, "tPump");
+NexText tRemote = NexText(0, 9, "tRem1");
+NexText tSensor = NexText(0, 10, "tSensor");
 
-NexNumber nTSetpoint = NexNumber(0, 6, "nTSetpoint");
-NexNumber nTCurrent = NexNumber(0, 7, "nTCurrent");
+NexNumber nTSetpoint = NexNumber(0, 1, "nTSetpoint");
+NexNumber nTCurrent = NexNumber(0, 2, "ntemp");
 
-NexButton bPlus = NexButton(0, 4, "bPlus");
-NexButton bMinus = NexButton(0, 5, "bMinus");
+NexButton bPlus = NexButton(0, 6, "bPlus");
+NexButton bMinus = NexButton(0, 7, "bMinus");
 
 NexTouch *nex_listen_list[] = {
   &bPlus,
@@ -72,7 +69,7 @@ NexTouch *nex_listen_list[] = {
 OneWire oneWire(PIN_TEMPERATURE);
 DallasTemperature sensors(&oneWire);
 
-Modbus slave(237, PIN_RS484_SIG); // [stream = Serial,] slave id = 237, rs485 control-pin = 3
+// Modbus slave(237, PIN_RS484_SIG); // [stream = Serial,] slave id = 237, rs485 control-pin = 3
 
 typedef struct {
   bool boiler;
@@ -94,23 +91,25 @@ typedef struct {
 State state;
 
 void bPlusCallback(void *ptr) {
-  state.temperature = changeTemperature(state.temperature, INCREASE_TEMP);
+  state.temperature = changeTemperature(state.temperature, state.temperature + 1);
 }
 
 void bMinusCallback(void *ptr) {
-  state.temperature = changeTemperature(state.temperature, DECREASE_TEMP);
+  state.temperature = changeTemperature(state.temperature, state.temperature - 1);
 }
 
 void setup() {
-  pinMode(PIN_RS484_SIG, OUTPUT);
+  // pinMode(PIN_RS484_SIG, OUTPUT);
 
-  Timer1.initialize(500);
-  Timer1.attachInterrupt(modbusPoll, 500);
+  // Timer1.initialize(500);
+  // Timer1.attachInterrupt(modbusPoll, 500);
 
-  slave.cbVector[CB_READ_REGISTERS] = modbusOut;
+  // slave.cbVector[CB_READ_REGISTERS] = modbusOut;
   
-  Serial.begin(9600, SERIAL_8N2);
-  slave.begin(9600);
+  // Serial.begin(9600, SERIAL_8N2);
+  // slave.begin(9600);
+
+  nexSerial.begin(115200);
 
   pinMode(PIN_TEMPERATURE, INPUT);
 //  pinMode(PIN_FLOW_SENSOR, INPUT_PULLUP);
@@ -126,23 +125,22 @@ void setup() {
   state.coil2 = false;
   state.coil3 = false;
   state.pump = false;
+  state.tempok = false;
   state.remote = getState(PIN_REMOTE_CONTROL);
 //  state.flow = getState(PIN_FLOW_SENSOR);
   state.temperature = 75;
   state.tempLastPoll = 0;
   state.tempChangeLastPoll = 0;
-  getTemperature();
   state.pumpStartTime = 0;
 
   int savedTemp = EEPROM.read(TEMPERATURE_EEPROM_ADDRESS);
   if (savedTemp) {
-    state.temperature = savedTemp;
+    state.temperature = changeTemperature(state.temperature, savedTemp);
   }
 
   sensors.begin();
 
   nexInit();
-
   bPlus.attachPop(bPlusCallback, &bPlus);
   bMinus.attachPop(bMinusCallback, &bMinus);
 }
@@ -154,35 +152,63 @@ void loop() {
   checkCoils();
   checkPump();
 
-  if (compareStates(oldState, state)) {
-    updateScreen();
-  }
-
-  nexLoop(nex_listen_list);
+  updateScreen(oldState, state);
 
   if (state.tempChangeLastPoll > 0 && millis() - state.tempChangeLastPoll > TEMP_CHANGE_POLL) {
-    EEPROM.write(TEMPERATURE_EEPROM_ADDRESS, state.temperature);
+    EEPROM.update(TEMPERATURE_EEPROM_ADDRESS, state.temperature);
     state.tempChangeLastPoll = 0;
   }
 
-  delay(1000);
+  nexLoop(nex_listen_list);
 }
 
-void updateScreen()
+void updateScreen(State oldState, State state)
 {
-  tCoil1.Set_background_color_bco(state.boiler ? COLOR_OK : COLOR_NORMAL);
-  tCoil2.Set_background_color_bco(state.coil2 ? COLOR_OK : COLOR_NORMAL);
-  tCoil3.Set_background_color_bco(state.coil3 ? COLOR_OK : COLOR_NORMAL);
+  if (oldState.boiler != state.boiler) {
+    tCoil1.Set_background_color_bco(state.boiler ? COLOR_OK : COLOR_NORMAL);
+  }
 
-  tPump.Set_background_color_bco(state.pump ? COLOR_OK : COLOR_NORMAL);
-  tRemote.Set_background_color_bco(state.remote ? COLOR_OK : COLOR_NORMAL);
-  tSensor.Set_background_color_bco(state.tempok ? COLOR_OK : COLOR_FAIL);
+  if (oldState.coil2 != state.coil2) {
+    tCoil2.Set_background_color_bco(state.coil2 ? COLOR_OK : COLOR_NORMAL);
+  }
 
-  nTCurrent.setValue(state.currentTemperature);
-  nTSetpoint.setValue(state.temperature);
+  if (oldState.coil3 != state.coil3) {
+    tCoil3.Set_background_color_bco(state.coil3 ? COLOR_OK : COLOR_NORMAL);
+  }
+
+  if (oldState.pump != state.pump) {
+    tPump.Set_background_color_bco(state.pump ? COLOR_OK : COLOR_NORMAL);
+  }
+
+  if (oldState.remote != state.remote) {
+    tRemote.Set_background_color_bco(state.remote ? COLOR_OK : COLOR_NORMAL);
+  }
+
+  if (oldState.tempok != state.tempok) {  
+    tSensor.Set_background_color_bco(state.tempok ? COLOR_OK : COLOR_FAIL);
+  }
+
+  if (oldState.currentTemperature != state.currentTemperature) {
+    nTCurrent.setValue(state.currentTemperature);
+  }
+
+  // if (oldState.temperature != state.temperature) {
+    nTSetpoint.setValue(state.temperature);
+  // }
+
+  /*Serial.print("Boiler: "); Serial.println(state.boiler ? COLOR_OK : COLOR_NORMAL);
+  Serial.print("Coil2: "); Serial.println(state.coil2 ? COLOR_OK : COLOR_NORMAL);
+  Serial.print("Coil3: "); Serial.println(state.coil3 ? COLOR_OK : COLOR_NORMAL);
+
+  Serial.print("Pump: "); Serial.println(state.pump ? COLOR_OK : COLOR_NORMAL);
+  Serial.print("Remote: "); Serial.println(state.remote ? COLOR_OK : COLOR_NORMAL);
+  Serial.print("Sensor: "); Serial.println(state.tempok ? COLOR_OK : COLOR_FAIL);
+
+  Serial.print("Current Temperature: "); Serial.println(state.currentTemperature);
+  Serial.print("Setpoint Temperature: "); Serial.println(state.temperature);*/
 }
 
-void modbusPoll()
+/*void modbusPoll()
 {
     slave.poll();
 }
@@ -212,7 +238,7 @@ uint8_t modbusOut(uint8_t fc, uint16_t address, uint16_t length)
     }
 
     return STATUS_OK;
-}
+}*/
 
 void manageBoiler()
 {
@@ -328,19 +354,18 @@ bool switchBoiler(bool on, bool forceoff)
   return false;
 }*/
 
-int changeTemperature(int temperature, char sign)
+int changeTemperature(int oldTemperature, int newTemperature)
 {
-  if (sign == INCREASE_TEMP && temperature < MAX_TEMPERATURE) {
-    temperature++;
-    state.tempChangeLastPoll = millis();
+  if (oldTemperature == newTemperature) {
+    return oldTemperature;
   }
 
-  if (sign == DECREASE_TEMP && temperature > MIN_TEMPERATURE) {
-    temperature--;
-    state.tempChangeLastPoll = millis();
+  if (newTemperature > MAX_TEMPERATURE || newTemperature < MIN_TEMPERATURE) {
+    return oldTemperature;
   }
 
-  return temperature;
+  state.tempChangeLastPoll = millis();
+  return newTemperature;
 }
 
 bool writePin(unsigned char pin, int value)
@@ -433,21 +458,4 @@ bool getState(unsigned char pin)
       state.remote = (value == LOW);
       return state.remote;
   }
-}
-
-bool compareStates(State old, State current)
-{
-  if (old.boiler != current.boiler ||
-      old.coil2 != current.coil2 ||
-      old.coil3 != current.coil3 ||
-      old.pump != current.pump ||
-      old.remote != current.remote ||
-//      old.flow != current.flow ||
-      old.temperature != current.temperature ||
-      old.currentTemperature != current.currentTemperature ||
-      old.tempok != current.tempok) {
-        return true;
-  }
-
-  return false;
 }
