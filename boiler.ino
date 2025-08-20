@@ -6,13 +6,7 @@
 #include <SoftwareSerial.h>
 #include <NextionX2.h>
 
-
 //#define PIN_FLOW_SENSOR 2
-
-#define PIN_RS484_RO 0 //tx
-#define PIN_RS484_DI 1 //rx
-#define PIN_RS484_SIG 3 // signal
-
 
 #define PIN_REMOTE_CONTROL A0
 #define PIN_TEMPERATURE A1
@@ -22,7 +16,6 @@
 #define PIN_COIL1 A3
 #define PIN_COIL2 A4
 #define PIN_COIL3 A5
-
 
 #define TEMPERATURE_EEPROM_ADDRESS 0
 
@@ -41,13 +34,14 @@
 #define TIME_POLL 60000
 #define TEMP_CHANGE_POLL 2000
 
+
+// Screen
 #define COLOR_OK 2016
 #define COLOR_FAIL 64073
 #define COLOR_NORMAL 50712
-
 #define NEXTION_FAIL 0xFFFFFFFF
 
-SoftwareSerial softSerial(3, 4);
+SoftwareSerial screenSerial(4, 5);
 
 NextionComPort nextion;
 NextionComponent tCoil1(nextion, 0, 4);
@@ -64,10 +58,17 @@ NextionComponent nTCurrent(nextion, 0, 3);
 NextionComponent bPlus(nextion, 0, 7);
 NextionComponent bMinus(nextion, 0, 8);
 
+// Sensor
 OneWire oneWire(PIN_TEMPERATURE);
 DallasTemperature sensors(&oneWire);
 
-// Modbus slave(237, PIN_RS484_SIG); // [stream = Serial,] slave id = 237, rs485 control-pin = 3
+// Modbus
+#define PIN_RS484_RO 0 //tx
+#define PIN_RS484_DI 1 //rx
+#define PIN_RS484_SIG 3 // signal
+#define MODBUS_ADDRESS 237
+
+Modbus modbus(MODBUS_ADDRESS, PIN_RS484_SIG);
 
 typedef struct {
   bool boiler;
@@ -101,18 +102,18 @@ void bMinusCallback() {
 }
 
 void setup() {
-  // pinMode(PIN_RS484_SIG, OUTPUT);
+  pinMode(PIN_RS484_SIG, OUTPUT);
 
-  // Timer1.initialize(500);
-  // Timer1.attachInterrupt(modbusPoll, 500);
+  Timer1.initialize(500);
+  Timer1.attachInterrupt(modbusPoll, 500);
 
-  // slave.cbVector[CB_READ_REGISTERS] = modbusOut;
-  
-  // Serial.begin(9600, SERIAL_8N2);
-  // slave.begin(9600);
+  modbus.cbVector[CB_READ_REGISTERS] = modbusOut;
+  modbus.cbVector[CB_WRITE_MULTIPLE_REGISTERS] = modbusIn;
 
-  nextion.begin(softSerial);
-  Serial.begin(9600);
+  Serial.begin(9600, SERIAL_8N2);
+  modbus.begin(9600);
+
+  nextion.begin(screenSerial);
 
   pinMode(PIN_TEMPERATURE, INPUT);
 //  pinMode(PIN_FLOW_SENSOR, INPUT_PULLUP);
@@ -211,9 +212,9 @@ void updateScreen(State oldState, State state)
   forceRedraw = false;
 }
 
-/*void modbusPoll()
+void modbusPoll()
 {
-    slave.poll();
+    modbus.poll();
 }
 
 uint8_t modbusOut(uint8_t fc, uint16_t address, uint16_t length)
@@ -222,26 +223,44 @@ uint8_t modbusOut(uint8_t fc, uint16_t address, uint16_t length)
     for (int i = 0; i < length; i++) {
         readAddress = address + i;
         if (readAddress == 0) {
-            slave.writeRegisterToBuffer(i, state.currentTemperature);
+            modbus.writeRegisterToBuffer(i, state.currentTemperature);
         } else if (readAddress == 1) {
-            slave.writeRegisterToBuffer(i, state.temperature);
+            modbus.writeRegisterToBuffer(i, state.temperature);
         } else if (readAddress == 2) {
-            slave.writeRegisterToBuffer(i, state.boiler ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.boiler ? 1 : 0);
         } else if (readAddress == 3) {
-            slave.writeRegisterToBuffer(i, state.coil2 ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.coil2 ? 1 : 0);
         } else if (readAddress == 4) {
-            slave.writeRegisterToBuffer(i, state.coil3 ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.coil3 ? 1 : 0);
         } else if (readAddress == 5) {
-            slave.writeRegisterToBuffer(i, state.pump ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.pump ? 1 : 0);
         } else if (readAddress == 6) {
-            slave.writeRegisterToBuffer(i, state.remote ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.remote ? 1 : 0);
         } else if (readAddress == 7) {
-            slave.writeRegisterToBuffer(i, state.tempok ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.tempok ? 1 : 0);
         }
     }
 
     return STATUS_OK;
-}*/
+}
+
+uint8_t modbusIn(uint8_t fc, uint16_t address, uint16_t length) 
+{
+    int value;
+    int readAddress = 0;
+    
+    for (int i = 0; i < length; i++) {
+        readAddress = address + i;
+
+        if (readAddress == 1) {
+          value = modbus.readRegisterFromBuffer(i);
+          state.temperature = changeTemperature(state.temperature, value);
+          forceRedraw = true;
+        }
+    }
+
+    return STATUS_OK;
+}
 
 void manageBoiler()
 {
