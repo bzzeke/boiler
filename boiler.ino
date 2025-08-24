@@ -1,26 +1,12 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ModbusSlave.h>
+#include <EEPROM.h>
+#include <SoftwareSerial.h>
+#include <NextionX2.h>
 #include <TimerOne.h>
 
-#include <SPI.h>
-#include <epd2in7.h>
-#include <epdpaint.h>
-
-#include <EEPROM.h>
-
-#define COLORED     0
-#define UNCOLORED   1
-
-#define PIN_KEY1 4
-#define PIN_KEY2 5
-#define PIN_KEY3 6
 //#define PIN_FLOW_SENSOR 2
-
-#define PIN_RS484_RO 0 //tx
-#define PIN_RS484_DI 1 //rx
-#define PIN_RS484_SIG 3 // signal
-
 
 #define PIN_REMOTE_CONTROL A0
 #define PIN_TEMPERATURE A1
@@ -31,14 +17,10 @@
 #define PIN_COIL2 A4
 #define PIN_COIL3 A5
 
+#define TEMPERATURE_EEPROM_ADDRESS 0
 
-#define EEPROM_ADDRESS 0
-
-#define MAX_TEMPERATURE 100
-#define MIN_TEMPERATURE 30
-
-#define INCREASE_TEMP '+'
-#define DECREASE_TEMP '-'
+#define MAX_TEMPERATURE 85
+#define MIN_TEMPERATURE 20
 
 #define HYSTERESIS 5
 
@@ -49,14 +31,43 @@
 #define TEMP_SENSOR_FAILURE 0
 #define FLOW_SENSOR_START_DELAY 10000
 #define W1_POLL 10000
-#define TIME_POLL 60000
+#define TEMP_CHANGE_POLL 2000
 
+
+// Screen
+#define COLOR_OK 2016
+#define COLOR_FAIL 64073
+#define COLOR_NORMAL 50712
+#define NEXTION_FAIL 0xFFFFFFFF
+
+SoftwareSerial screenSerial(4, 5);
+
+NextionComPort nextion;
+NextionComponent tCoil1(nextion, 0, 4);
+NextionComponent tCoil2(nextion, 0, 5);
+NextionComponent tCoil3(nextion, 0, 6);
+
+NextionComponent tPump(nextion, 0, 9);
+NextionComponent tRemote(nextion, 0, 10);
+NextionComponent tSensor(nextion, 0, 11);
+
+NextionComponent nTSetpoint(nextion, 0, 2);
+NextionComponent nTCurrent(nextion, 0, 3);
+
+NextionComponent bPlus(nextion, 0, 7);
+NextionComponent bMinus(nextion, 0, 8);
+
+// Sensor
 OneWire oneWire(PIN_TEMPERATURE);
 DallasTemperature sensors(&oneWire);
 
-Modbus slave(237, PIN_RS484_SIG); // [stream = Serial,] slave id = 237, rs485 control-pin = 3
+// Modbus
+#define PIN_RS484_RO 0 //tx
+#define PIN_RS484_DI 1 //rx
+#define PIN_RS484_SIG 3 // signal
+#define MODBUS_ADDRESS 237
 
-Epd epd;
+Modbus modbus(MODBUS_ADDRESS, PIN_RS484_SIG);
 
 typedef struct {
   bool boiler;
@@ -71,11 +82,25 @@ typedef struct {
   int temperature;
   int currentTemperature;
   unsigned long tempLastPoll;
-  unsigned long timeLastPoll;
+  unsigned long tempChangeLastPoll;
   unsigned long pumpStartTime;
 } State;
 
 State state;
+int forceRedraw = false;
+int displayReady = false;
+int lastScreenProbe = 0;
+#define SCREEN_PROBE_INTERVAL 2000
+
+void bPlusCallback() {
+  state.temperature = changeTemperature(state.temperature, state.temperature + 1);
+  forceRedraw = true;
+}
+
+void bMinusCallback() {
+  state.temperature = changeTemperature(state.temperature, state.temperature - 1);
+  forceRedraw = true;
+}
 
 void setup() {
   pinMode(PIN_RS484_SIG, OUTPUT);
@@ -83,13 +108,13 @@ void setup() {
   Timer1.initialize(500);
   Timer1.attachInterrupt(modbusPoll, 500);
 
-  slave.cbVector[CB_READ_REGISTERS] = modbusOut;
-  Serial.begin(9600, SERIAL_8N2);
-  slave.begin(9600);
+  modbus.cbVector[CB_READ_REGISTERS] = modbusOut;
+  modbus.cbVector[CB_WRITE_MULTIPLE_REGISTERS] = modbusIn;
 
-  pinMode(PIN_KEY1, INPUT_PULLUP);
-  pinMode(PIN_KEY2, INPUT_PULLUP);
-  pinMode(PIN_KEY3, INPUT_PULLUP);
+  Serial.begin(9600, SERIAL_8N2);
+  modbus.begin(9600);
+
+  nextion.begin(screenSerial);
 
   pinMode(PIN_TEMPERATURE, INPUT);
 //  pinMode(PIN_FLOW_SENSOR, INPUT_PULLUP);
@@ -105,40 +130,105 @@ void setup() {
   state.coil2 = false;
   state.coil3 = false;
   state.pump = false;
+  state.tempok = false;
   state.remote = getState(PIN_REMOTE_CONTROL);
 //  state.flow = getState(PIN_FLOW_SENSOR);
+  state.currentTemperature = 0;
   state.temperature = 75;
   state.tempLastPoll = 0;
-  state.timeLastPoll = 0;
-  getTemperature();
+  state.tempChangeLastPoll = 0;
   state.pumpStartTime = 0;
 
-  /*int savedTemp = EEPROM.read(EEPROM_ADDRESS);
+  int savedTemp = EEPROM.read(TEMPERATURE_EEPROM_ADDRESS);
   if (savedTemp) {
-    state.temperature = savedTemp;
-  }*/
+    state.temperature = changeTemperature(state.temperature, savedTemp);
+  }
 
   sensors.begin();
+
+  bPlus.release(bPlusCallback);
+  bMinus.release(bMinusCallback);
 }
 
 void loop() {
   State oldState = state;
 
-  handleKeys();
   manageBoiler();
   checkCoils();
   checkPump();
 
-  if (compareStates(oldState, state)) {
-    updateScreen();
+  probeScreen();
+  updateScreen(oldState, state);
+
+  if (state.tempChangeLastPoll > 0 && millis() - state.tempChangeLastPoll > TEMP_CHANGE_POLL) {
+    EEPROM.update(TEMPERATURE_EEPROM_ADDRESS, state.temperature);
+    state.tempChangeLastPoll = 0;
   }
 
-  delay(1000);
+  nextion.update();
+}
+
+void probeScreen()
+{
+  if (millis() - lastScreenProbe < SCREEN_PROBE_INTERVAL) {
+    return;
+  }
+
+  lastScreenProbe = millis();
+  bool nowReady = nTSetpoint.value() != NEXTION_FAIL;
+
+  if (displayReady != nowReady) {
+    if (nowReady == true) {
+      forceRedraw = true;
+    }
+    displayReady = nowReady;
+  }
+}
+
+void updateScreen(State oldState, State state)
+{
+  if (!displayReady) {
+    return;
+  }
+
+  if (oldState.boiler != state.boiler || forceRedraw) {
+    tCoil1.attribute("bco", state.boiler ? COLOR_OK : COLOR_NORMAL);
+  }
+
+  if (oldState.coil2 != state.coil2 || forceRedraw) {
+    tCoil2.attribute("bco", state.coil2 ? COLOR_OK : COLOR_NORMAL);
+  }
+
+  if (oldState.coil3 != state.coil3 || forceRedraw) {
+    tCoil3.attribute("bco", state.coil3 ? COLOR_OK : COLOR_NORMAL);
+  }
+
+  if (oldState.pump != state.pump|| forceRedraw) {
+    tPump.attribute("bco", state.pump ? COLOR_OK : COLOR_NORMAL);
+  }
+
+  if (oldState.remote != state.remote || forceRedraw) {
+    tRemote.attribute("bco", state.remote ? COLOR_OK : COLOR_NORMAL);
+  }
+
+  if (oldState.tempok != state.tempok || forceRedraw) {
+    tSensor.attribute("bco", state.tempok ? COLOR_OK : COLOR_FAIL);
+  }
+
+  if (oldState.currentTemperature != state.currentTemperature || forceRedraw) {
+    nTCurrent.value(state.currentTemperature);
+  }
+
+  if (oldState.temperature != state.temperature || forceRedraw) {
+    nTSetpoint.value(state.temperature);
+  }
+
+  forceRedraw = false;
 }
 
 void modbusPoll()
 {
-    slave.poll();
+    modbus.poll();
 }
 
 uint8_t modbusOut(uint8_t fc, uint16_t address, uint16_t length)
@@ -147,21 +237,39 @@ uint8_t modbusOut(uint8_t fc, uint16_t address, uint16_t length)
     for (int i = 0; i < length; i++) {
         readAddress = address + i;
         if (readAddress == 0) {
-            slave.writeRegisterToBuffer(i, state.currentTemperature);
+            modbus.writeRegisterToBuffer(i, state.currentTemperature);
         } else if (readAddress == 1) {
-            slave.writeRegisterToBuffer(i, state.temperature);
+            modbus.writeRegisterToBuffer(i, state.temperature);
         } else if (readAddress == 2) {
-            slave.writeRegisterToBuffer(i, state.boiler ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.boiler ? 1 : 0);
         } else if (readAddress == 3) {
-            slave.writeRegisterToBuffer(i, state.coil2 ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.coil2 ? 1 : 0);
         } else if (readAddress == 4) {
-            slave.writeRegisterToBuffer(i, state.coil3 ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.coil3 ? 1 : 0);
         } else if (readAddress == 5) {
-            slave.writeRegisterToBuffer(i, state.pump ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.pump ? 1 : 0);
         } else if (readAddress == 6) {
-            slave.writeRegisterToBuffer(i, state.remote ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.remote ? 1 : 0);
         } else if (readAddress == 7) {
-            slave.writeRegisterToBuffer(i, state.tempok ? 1 : 0);
+            modbus.writeRegisterToBuffer(i, state.tempok ? 1 : 0);
+        }
+    }
+
+    return STATUS_OK;
+}
+
+uint8_t modbusIn(uint8_t fc, uint16_t address, uint16_t length)
+{
+    int value;
+    int readAddress = 0;
+
+    for (int i = 0; i < length; i++) {
+        readAddress = address + i;
+
+        if (readAddress == 1) {
+          value = modbus.readRegisterFromBuffer(i);
+          state.temperature = changeTemperature(state.temperature, value);
+          forceRedraw = true;
         }
     }
 
@@ -270,104 +378,30 @@ bool switchBoiler(bool on, bool forceoff)
   return true;
 }
 
-void updateScreen()
+
+/*bool handleKeys()
 {
-  unsigned char image[1024];
-  char line1[20];
-  char line2[20];
-  char line3[50];
-  char line4[50];
-  char line5[50];
-
-  sprintf(line1, "Target: %d", state.temperature);
-  sprintf(line2, "Current: %d", state.currentTemperature);
-  sprintf(line3, "C1: [%s], C2: [%s], C3: [%s]", (state.boiler == true ? "ON" : "OFF"), (state.coil2 == true ? "ON" : "OFF"), (state.coil3 == true ? "ON" : "OFF"));
-  sprintf(line4, "Pump: [%s], Remote: [%s]", (state.pump == true ? "ON" : "OFF"), (state.remote == true ? "ON" : "OFF"));
-  sprintf(line5, "Temp: [%s]", (state.tempok == true ? "OK" : "FAIL"));
-
-  /*Serial.println("Screen");
-  Serial.println(line1);
-  Serial.println(line2);
-  Serial.println(line3);
-  Serial.println(line4);
-  Serial.println(line5);
-*/
-  return;
-
-  if (epd.Init() != 0) {
-//    Serial.print("e-Paper init failed");
-  }
-
-  epd.ClearFrame();
-
-  Paint paint(image, 24, 264);
-  paint.SetRotate(ROTATE_90);
-
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line1, &Font20, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 151, 5, paint.GetWidth(), paint.GetHeight());
-
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line2, &Font20, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 120, 5, paint.GetWidth(), paint.GetHeight());
-
-  paint.SetWidth(16);
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line3, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 100, 5, paint.GetWidth(), paint.GetHeight());
-
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line4, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 87, 5, paint.GetWidth(), paint.GetHeight());
-
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line5, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 70, 5, paint.GetWidth(), paint.GetHeight());
-
-  /*paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, line6, &Font12, COLORED);
-  epd.TransmitPartialData(paint.GetImage(), 53, 5, paint.GetWidth(), paint.GetHeight());    */
-
-  epd.DisplayFrame();
-  epd.Sleep();
-}
-
-bool handleKeys()
-{
-  // increase temperature
-  if (digitalRead(PIN_KEY2) == LOW) {
-    state.temperature = changeTemperature(state.temperature, INCREASE_TEMP );
-//    EEPROM.write(EEPROM_ADDRESS, state.temperature);
-    return true;
-  }
-
-  // decrese temperature
-  if (digitalRead(PIN_KEY1) == LOW) {
-    state.temperature = changeTemperature(state.temperature, DECREASE_TEMP);
-//    EEPROM.write(EEPROM_ADDRESS, state.temperature);
-    return true;
-  }
-
   // reset failed state
-  /*if (digitalRead(PIN_KEY3) == LOW) {
+  if (digitalRead(PIN_KEY3) == LOW) {
     failedState = false;
     return true;
-  }*/
+  }
 
   return false;
-}
+}*/
 
-int changeTemperature(int temperature, char sign)
+int changeTemperature(int oldTemperature, int newTemperature)
 {
-  if (sign == INCREASE_TEMP && temperature < MAX_TEMPERATURE) {
-    temperature++;
+  if (oldTemperature == newTemperature) {
+    return oldTemperature;
   }
 
-  if (sign == DECREASE_TEMP && temperature > MIN_TEMPERATURE) {
-    temperature--;
+  if (newTemperature > MAX_TEMPERATURE || newTemperature < MIN_TEMPERATURE) {
+    return oldTemperature;
   }
 
-  return temperature;
+  state.tempChangeLastPoll = millis();
+  return newTemperature;
 }
 
 bool writePin(unsigned char pin, int value)
@@ -460,21 +494,4 @@ bool getState(unsigned char pin)
       state.remote = (value == LOW);
       return state.remote;
   }
-}
-
-bool compareStates(State old, State current)
-{
-  if (old.boiler != current.boiler ||
-      old.coil2 != current.coil2 ||
-      old.coil3 != current.coil3 ||
-      old.pump != current.pump ||
-      old.remote != current.remote ||
-//      old.flow != current.flow ||
-      old.temperature != current.temperature ||
-      old.currentTemperature != current.currentTemperature ||
-      old.tempok != current.tempok) {
-        return true;
-  }
-
-  return false;
 }
