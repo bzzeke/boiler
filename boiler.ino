@@ -1,10 +1,10 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ModbusSlave.h>
-#include <TimerOne.h>
 #include <EEPROM.h>
 #include <SoftwareSerial.h>
 #include <NextionX2.h>
+#include <TimerOne.h>
 
 //#define PIN_FLOW_SENSOR 2
 
@@ -31,7 +31,6 @@
 #define TEMP_SENSOR_FAILURE 0
 #define FLOW_SENSOR_START_DELAY 10000
 #define W1_POLL 10000
-#define TIME_POLL 60000
 #define TEMP_CHANGE_POLL 2000
 
 
@@ -89,7 +88,9 @@ typedef struct {
 
 State state;
 int forceRedraw = false;
-int displayInit = false;
+int displayReady = false;
+int lastScreenProbe = 0;
+#define SCREEN_PROBE_INTERVAL 2000
 
 void bPlusCallback() {
   state.temperature = changeTemperature(state.temperature, state.temperature + 1);
@@ -156,6 +157,7 @@ void loop() {
   checkCoils();
   checkPump();
 
+  probeScreen();
   updateScreen(oldState, state);
 
   if (state.tempChangeLastPoll > 0 && millis() - state.tempChangeLastPoll > TEMP_CHANGE_POLL) {
@@ -166,15 +168,27 @@ void loop() {
   nextion.update();
 }
 
+void probeScreen()
+{
+  if (millis() - lastScreenProbe < SCREEN_PROBE_INTERVAL) {
+    return;
+  }
+
+  lastScreenProbe = millis();
+  bool nowReady = nTSetpoint.value() != NEXTION_FAIL;
+
+  if (displayReady != nowReady) {
+    if (nowReady == true) {
+      forceRedraw = true;
+    }
+    displayReady = nowReady;
+  }
+}
+
 void updateScreen(State oldState, State state)
 {
-  if (!displayInit) {
-    if (nTSetpoint.value() == NEXTION_FAIL) {
-      return;
-    }
-
-    displayInit = true;
-    forceRedraw = true;
+  if (!displayReady) {
+    return;
   }
 
   if (oldState.boiler != state.boiler || forceRedraw) {
@@ -197,7 +211,7 @@ void updateScreen(State oldState, State state)
     tRemote.attribute("bco", state.remote ? COLOR_OK : COLOR_NORMAL);
   }
 
-  if (oldState.tempok != state.tempok || forceRedraw) {  
+  if (oldState.tempok != state.tempok || forceRedraw) {
     tSensor.attribute("bco", state.tempok ? COLOR_OK : COLOR_FAIL);
   }
 
@@ -244,11 +258,11 @@ uint8_t modbusOut(uint8_t fc, uint16_t address, uint16_t length)
     return STATUS_OK;
 }
 
-uint8_t modbusIn(uint8_t fc, uint16_t address, uint16_t length) 
+uint8_t modbusIn(uint8_t fc, uint16_t address, uint16_t length)
 {
     int value;
     int readAddress = 0;
-    
+
     for (int i = 0; i < length; i++) {
         readAddress = address + i;
 
